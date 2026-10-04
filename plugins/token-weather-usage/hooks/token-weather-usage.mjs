@@ -300,19 +300,23 @@ export function register(on, options) {
     const at = await $.clock.now();
     const stream = next(e);
     // The times are asked for as the chunks arrive and read once the stream ends, so no chunk waits.
+    // An interrupt can leave them unread: a failed read is null, and the request is not counted.
     let first = null;
     let stop = null;
     let outputTokens = 0;
     for await (const chunk of stream) {
-      if (first === null) first = $.clock.now();
+      if (first === null) first = $.clock.now().catch(() => null);
       if (chunk.kind === "stop") {
-        stop = $.clock.now();
+        stop = $.clock.now().catch(() => null);
         outputTokens = chunk.usage?.output_tokens ?? 0;
       }
       yield chunk;
     }
     const result = await stream.result;
-    if (first !== null && stop !== null) recordSpeed(e.turnId, outputTokens, (await stop) - (await first));
+    if (first !== null && stop !== null) {
+      const [from, to] = [await first, await stop];
+      if (from !== null && to !== null) recordSpeed(e.turnId, outputTokens, to - from);
+    }
     if (result?.usage) {
       recordRequest(at, result.usage);
       // The request may have started an agent.
