@@ -1,12 +1,16 @@
 {
-  "name": "augiefra-mods",
-  "owner": { "name": "Eric Cologni" },
-  "metadata": { "description": "Claude Code mods by Eric Cologni." },
+  "name": "hnkabraham-mods",
+  "owner": {
+    "name": "hnkabraham"
+  },
+  "metadata": {
+    "description": "hnkabraham's fork of Eric Cologni's Claude Code mods (augiefra/claude-mods), with output speed added."
+  },
   "plugins": [
     {
       "name": "token-weather-usage",
       "source": "./plugins/token-weather-usage",
-      "description": "Context, 5-hour and 7-day limits against the clock, prompt cache countdown, session cost and running agents, in one band above the prompt."
+      "description": "Context, output speed (tok/s), 5-hour and 7-day limits against the clock, prompt cache countdown, session cost and running agents, in one band above the prompt."
     }
   ]
 }

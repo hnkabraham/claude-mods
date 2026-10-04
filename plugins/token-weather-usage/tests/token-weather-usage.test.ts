@@ -373,3 +373,99 @@ test("agents: a pill while subagents run, gone once they finish", async ($, on) 
   const after = await band($, "terminal");
   expect(after.texts.some((t: string) => t.includes("agent"))).toBe(false);
 });
+
+// ---------- Output speed (fork) ----------
+
+// One streamed main-loop request: a chunk, `ms` of streaming, then the stop with the output tokens.
+function streamingStep(on: any, clock: any, steps: { ms: number; output: number }[]) {
+  let call = 0;
+  on("turn.step", async function* (_$: any, e: any) {
+    const { ms, output } = steps[Math.min(call++, steps.length - 1)];
+    const usage = { ...HIT, output_tokens: output };
+    yield { kind: "text", index: 0, text: "Hello" };
+    if (ms > 0) await clock.advance(ms);
+    yield { kind: "stop", stopReason: "end_turn", usage };
+    return { turnId: e.turnId, index: e.index, answer: "Hello", toolUses: [], stopReason: "end_turn", usage };
+  });
+}
+
+async function streamed($: any, turnId: string, index = 0, agentId?: string) {
+  const stream = $.turn.step({ turnId, index, model: "claude-opus-5-5", messageCount: 2, ...(agentId ? { agentId } : {}) });
+  for await (const _ of stream) {
+  }
+  return stream.result;
+}
+
+function speedWorld(on: any) {
+  const clock = mock.clock(on, { now: NOW });
+  mock.store(on, {});
+  mock.env(on, {});
+  on("session.id", () => ({ value: "session-1" }));
+  on("session.start", (_$: any, e: any) => ({ cwd: e.cwd ?? "/tmp" }));
+  on("ui.invalidate", () => ({ value: undefined }));
+  on("ui.render", ($: any, e: any) => $.ui.resolve(e).Box({ children: [] }));
+  withUsage(on, LIMITS);
+  return clock;
+}
+
+for (const surface of ["terminal", "desktop"] as const) {
+  test(`speed: output tokens per second of streaming ${surface}`, async ($, on) => {
+    const clock = speedWorld(on);
+    // 200 tokens streamed in 4 seconds: 50 tok/s.
+    streamingStep(on, clock, [{ ms: 4_000, output: 200 }]);
+    await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+    await streamed($, "t1");
+    const { ui, texts } = await band($, surface);
+    expect(texts).toContain("50");
+    expect(texts).toContain("tok/s");
+    // Right after the context block, before the limits.
+    expect(texts.indexOf("tok/s")).toBeLessThan(texts.indexOf("5h"));
+    if (surface === "desktop") {
+      const svgs = (await ui.findAll({ type: "Svg" })) as any[];
+      const watch = svgs.find((s) => s.props?.alt === "Output speed");
+      expect(String(watch?.props?.source)).toContain("200 tokens in 4.0 s");
+      expect(String(watch?.props?.source)).toContain("color-scheme:light dark");
+      expect(watch?.props?.isInteractive).toBe(true);
+    }
+  });
+}
+
+test("speed: summed over a turn's requests, started over on the next turn", async ($, on) => {
+  const clock = speedWorld(on);
+  // Turn 1: 300 tokens in 2 s, then 100 tokens in 6 s: 400 / 8 = 50 tok/s. Turn 2: 90 tokens in 1 s.
+  streamingStep(on, clock, [{ ms: 2_000, output: 300 }, { ms: 6_000, output: 100 }, { ms: 1_000, output: 90 }]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await streamed($, "t1", 0);
+  await streamed($, "t1", 1);
+  expect((await band($, "terminal")).texts).toContain("50");
+  await streamed($, "t2", 0);
+  expect((await band($, "terminal")).texts).toContain("90");
+});
+
+test("speed: a response that arrived all at once, or a subagent's, shows nothing", async ($, on) => {
+  const clock = speedWorld(on);
+  streamingStep(on, clock, [{ ms: 0, output: 500 }, { ms: 3_000, output: 300 }]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await streamed($, "t1");
+  expect((await band($, "terminal")).texts).not.toContain("tok/s");
+  await streamed($, "t2", 0, "agent-1");
+  expect((await band($, "terminal")).texts).not.toContain("tok/s");
+});
+
+test("speed: one decimal under 10 tok/s, French unit unchanged", async ($, on) => {
+  const clock = mock.clock(on, { now: NOW });
+  mock.store(on, {});
+  mock.env(on, { LANG: "fr_FR.UTF-8" });
+  on("session.id", () => ({ value: "session-1" }));
+  on("session.start", (_$: any, e: any) => ({ cwd: e.cwd ?? "/tmp" }));
+  on("ui.invalidate", () => ({ value: undefined }));
+  on("ui.render", ($: any, e: any) => $.ui.resolve(e).Box({ children: [] }));
+  withUsage(on, LIMITS);
+  // 37 tokens in 5 s: 7.4 tok/s.
+  streamingStep(on, clock, [{ ms: 5_000, output: 37 }]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await streamed($, "t1");
+  const { texts } = await band($, "terminal");
+  expect(texts).toContain("7.4");
+  expect(texts).toContain("tok/s");
+});

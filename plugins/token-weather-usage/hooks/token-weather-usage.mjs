@@ -1,6 +1,6 @@
 // Token Weather Usage: one line above the prompt.
 //   Terminal, blocks split by a thin rule:
-//   ☁ 440k ▃▆▂█▃▄▂▇ ▲ +8.4k │ 5h ━━━╍╍╍── 37% · 2h22 → 18:20 │ 7d ━━━━╍─── 60% · 2d23h │ cache 98% · 52 min │ ≈ $4.32 (+$0.84) │ 2 agents
+//   ☁ 440k ▃▆▂█▃▄▂▇ ▲ +8.4k │ 97 tok/s │ 5h ━━━╍╍╍── 37% · 2h22 → 18:20 │ 7d ━━━━╍─── 60% · 2d23h │ cache 98% · 52 min │ ≈ $4.32 (+$0.84) │ 2 agents
 //   Desktop app: the same blocks as tinted, outlined pills.
 //
 // Weather, context and recent turns: adapted from the Token Weather example,
@@ -9,6 +9,7 @@
 //   (https://github.com/HolyGrail/claude-mods/tree/main/plugins/usage-meter), without copying its code.
 // Prompt cache: written for this mod after Daniel San's prompt-cache-control
 //   (https://github.com/davila7/claude-code-templates, MIT), without copying its code.
+// Output speed (tok/s): added in hnkabraham's fork, October 2026; this file is modified from upstream.
 //
 // The engine reads on(...) and $.noun.method(...) from the source: they stay spelled out,
 // and the functions that take $ live at the top level.
@@ -35,7 +36,9 @@ const TEXT = {
     cost: (usd) => `≈ $${usd.toFixed(2)}`,
     lastPrompt: (usd) => `+$${usd.toFixed(2)}`,
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
-    icons: { five_hour: "5-hour limit", seven_day: "7-day limit", spend_limit: "Spend limit", reset: "Resets in", cache: "Prompt cache", cost: "Session cost", lastPrompt: "Last prompt", agents: "Agents running" },
+    speed: "tok/s",
+    speedAlt: (tokens, seconds) => `Output speed, last turn · ${tokens} tokens in ${seconds} s`,
+    icons: { five_hour: "5-hour limit", seven_day: "7-day limit", spend_limit: "Spend limit", reset: "Resets in", cache: "Prompt cache", cost: "Session cost", lastPrompt: "Last prompt", agents: "Agents running", speed: "Output speed" },
   },
   fr: {
     weather: { clear: "Clair", cloudy: "Nuageux", showers: "Averses", storm: "Orage", compact: "Compacter bientôt" },
@@ -53,7 +56,9 @@ const TEXT = {
     cost: (usd) => `≈ ${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
-    icons: { five_hour: "Limite 5 h", seven_day: "Limite 7 jours", spend_limit: "Plafond de dépense", reset: "Remise à zéro dans", cache: "Cache de prompt", cost: "Coût du fil", lastPrompt: "Dernier prompt", agents: "Agents en cours" },
+    speed: "tok/s",
+    speedAlt: (tokens, seconds) => `Vitesse de sortie, dernier tour · ${tokens} tokens en ${seconds.replace(".", ",")} s`,
+    icons: { five_hour: "Limite 5 h", seven_day: "Limite 7 jours", spend_limit: "Plafond de dépense", reset: "Remise à zéro dans", cache: "Cache de prompt", cost: "Coût du fil", lastPrompt: "Dernier prompt", agents: "Agents en cours", speed: "Vitesse de sortie" },
   },
 };
 let T = TEXT.en;
@@ -165,6 +170,16 @@ let promptBase = null;
 let agents = [];
 let agentsKey = "";
 
+// ---------- Output speed ----------
+
+// Tokens the main loop generated per second of streaming, summed over the latest turn's requests.
+// Each request is timed from its first streamed chunk (the envelope included, so thinking that is
+// not shown still counts as time) to its stop: the wait before the response starts is left out.
+// A request whose chunks all arrived at once says nothing about speed.
+const MIN_STREAM_MS = 200;
+// { turnId, tokens, ms }: the latest turn's sums.
+let speed = null;
+
 // ---------- Layout ----------
 
 const SEP = "│";
@@ -189,6 +204,7 @@ const TINTS = {
   alert: ["rgba(214,69,69,0.12)", "rgba(214,69,69,0.36)"],
   cost: ["rgba(184,140,40,0.13)", "rgba(184,140,40,0.34)"],
   agents: ["rgba(196,80,127,0.11)", "rgba(196,80,127,0.32)"],
+  speed: ["rgba(17,154,140,0.11)", "rgba(17,154,140,0.30)"],
 };
 // Small outlined icons in the app, each in its pill's color (the alt text is required: a
 // drawing without one is dropped). The clock before a reset time takes the pill's color too.
@@ -211,9 +227,12 @@ const ICONS = {
   // A small robot: subagents at work.
   agents: (c) =>
     `<rect x="4" y="7.5" width="16" height="12.5" rx="3.5" fill="${c}" fill-opacity="0.14" stroke="${c}" stroke-width="2"/><path d="M12 7.5V4M2 12.5v3M22 12.5v3" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="3.2" r="1.3" fill="${c}"/><circle cx="9" cy="13" r="1.5" fill="${c}"/><circle cx="15" cy="13" r="1.5" fill="${c}"/><path d="M9.5 16.8h5" fill="none" stroke="${c}" stroke-width="1.8" stroke-linecap="round"/>`,
+  // A stopwatch: how fast the model writes.
+  stopwatch: (c) =>
+    `<circle cx="12" cy="13.5" r="8" fill="${c}" fill-opacity="0.14" stroke="${c}" stroke-width="2"/><path d="M10 2.5h4M12 2.5v3M12 13.5l3.4-3.4M18.6 6.6l1.4-1.4" fill="none" stroke="${c}" stroke-width="2" stroke-linecap="round"/>`,
 };
 // Icon color per block: deeper than the pill's tint, readable on light and dark backgrounds.
-const ICON_COLORS = { five_hour: "#3a9a62", seven_day: "#8a5fd0", spend_limit: "#b8892a", calm: "#1b9cbe", fast: "#d9962b", alert: "#d64545", cost: "#b8892a", agents: "#c4507f" };
+const ICON_COLORS = { five_hour: "#3a9a62", seven_day: "#8a5fd0", spend_limit: "#b8892a", calm: "#1b9cbe", fast: "#d9962b", alert: "#d64545", cost: "#b8892a", agents: "#c4507f", speed: "#119a8c" };
 const LIMIT_ICONS = { five_hour: "gauge", seven_day: "calendar", spend_limit: "coin" };
 // Columns the terminal may cover at the end of the band.
 const RESERVED_COLUMNS = 2;
@@ -230,6 +249,7 @@ export function register(on, options) {
     cache = null;
     seenTtl = null;
     lastPrompt = null;
+    speed = null;
     cacheKey = "";
     cacheEnv = await cacheEnvOf($);
     turnsKey = TURNS_PREFIX + (await $.session.id());
@@ -273,11 +293,26 @@ export function register(on, options) {
     return next(e);
   });
 
-  // Each main-loop request: how much of its prompt the cache served (subagents have their own).
+  // Each main-loop request: how much of its prompt the cache served (subagents have their own),
+  // and how fast it streamed.
   on("turn.step", async function* ($, e, next) {
     if (e.agentId) return yield* next(e);
     const at = await $.clock.now();
-    const result = yield* next(e);
+    const stream = next(e);
+    // The times are asked for as the chunks arrive and read once the stream ends, so no chunk waits.
+    let first = null;
+    let stop = null;
+    let outputTokens = 0;
+    for await (const chunk of stream) {
+      if (first === null) first = $.clock.now();
+      if (chunk.kind === "stop") {
+        stop = $.clock.now();
+        outputTokens = chunk.usage?.output_tokens ?? 0;
+      }
+      yield chunk;
+    }
+    const result = await stream.result;
+    if (first !== null && stop !== null) recordSpeed(e.turnId, outputTokens, (await stop) - (await first));
     if (result?.usage) {
       recordRequest(at, result.usage);
       // The request may have started an agent.
@@ -363,6 +398,7 @@ async function restoreTurns($) {
         if (saved.cache && Number.isFinite(saved.cache.at)) cache = saved.cache;
         if (saved.seenTtl === "5m" || saved.seenTtl === "1h") seenTtl = saved.seenTtl;
         if (Number.isFinite(saved.lastPrompt)) lastPrompt = saved.lastPrompt;
+        if (saved.speed && saved.speed.tokens > 0 && saved.speed.ms > 0) speed = saved.speed;
       } else if (!saved || !(now - saved.at < TURNS_KEEP_MS)) await $.store.delete(key);
     }
   } catch {
@@ -373,7 +409,7 @@ async function restoreTurns($) {
 async function saveTurns($) {
   if (!turnsKey) return;
   try {
-    await $.store.set(turnsKey, { at: await $.clock.now(), readings, cache, seenTtl, lastPrompt });
+    await $.store.set(turnsKey, { at: await $.clock.now(), readings, cache, seenTtl, lastPrompt, speed });
   } catch {
     // Not saved this turn: the bars come back on the next one.
   }
@@ -546,6 +582,26 @@ async function refreshAgents($) {
   return true;
 }
 
+// ---------- Output speed: requests and rate ----------
+
+// Adds one streamed request to its turn's sums; a new turn starts them over.
+function recordSpeed(turnId, tokens, ms) {
+  if (!(tokens > 0) || !(ms >= MIN_STREAM_MS)) return;
+  if (!speed || speed.turnId !== turnId) speed = { turnId, tokens: 0, ms: 0 };
+  speed.tokens += tokens;
+  speed.ms += ms;
+}
+
+// Tokens per second of the latest turn; null before any streamed request.
+function speedRate() {
+  return speed && speed.ms > 0 ? speed.tokens / (speed.ms / 1000) : null;
+}
+
+// 68, 140, 7.4: one decimal under 10.
+function speedValue(rate) {
+  return rate < 10 ? rate.toFixed(1) : String(Math.round(rate));
+}
+
 function cacheText(state) {
   return state ? `${T.cache} ${state.value}${state.detail ? ` · ${state.detail}` : ""}` : "";
 }
@@ -671,6 +727,19 @@ function drawLine(elements, surface, columns, now) {
     }
     blocks.push({ key: "context", tint: TINTS.context, parts });
   }
+  // Output speed next to the context: both are about the latest turn.
+  const rate = speedRate();
+  if (rate !== null) {
+    const parts = [];
+    if (desktop) {
+      // The tooltip says what the rate was measured over.
+      const title = T.speedAlt(short(speed.tokens), (speed.ms / 1000).toFixed(1));
+      const source = `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_SIZE}" height="${ICON_SIZE}" viewBox="0 0 24 24">${FRAME_SCHEME}<title>${escapeXml(title)}</title>${ICONS.stopwatch(ICON_COLORS.speed)}</svg>`;
+      parts.push(Svg({ key: "i", source, alt: T.icons.speed, width: ICON_SIZE, height: ICON_SIZE, isInteractive: true }));
+    }
+    parts.push(Text({ key: "v", bold: true, children: speedValue(rate) }), Text({ key: "u", dimColor: true, children: T.speed }));
+    blocks.push({ key: "speed", tint: TINTS.speed, parts });
+  }
   for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g));
   if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow));
   // The cost goes first when the terminal is short of room.
@@ -720,6 +789,11 @@ function textWidth(gauges, cacheNow) {
     const cur = readings[readings.length - 1];
     width += 2 + short(cur.tokens).length;
     if (readings.length >= 2) width += 1 + turnDeltas().length + 1 + trendWord().length;
+    blocks++;
+  }
+  const rate = speedRate();
+  if (rate !== null) {
+    width += speedValue(rate).length + 1 + T.speed.length;
     blocks++;
   }
   for (const g of gauges) width += g.label.length + 1 + TEXT_CELLS + 1 + g.value.length + (g.when ? 3 + g.when.length : 0);

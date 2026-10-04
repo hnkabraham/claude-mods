@@ -13,6 +13,7 @@ One band above the Claude Code prompt: the context in tokens, your 5-hour and 7-
 ![Slow down](https://raw.githubusercontent.com/augiefra/claude-mods/main/docs/situations/alert.png)
 
 - **Context**: tokens in the context with a weather icon (hover it for the share of the window), one bar per recent prompt, the last prompt's change.
+- **Speed** (fork): output tokens per second over the latest turn, timed from each request's first streamed chunk to its stop. Main loop only.
 - **5h / 7d**: the share of your account's limits already used, in green, yellow or red by pace. The gap with the time elapsed is hatched: grey while you have margin, in the bar's color when you use faster than time passes. Then the time left and the reset time (machine's time zone).
 - **Cache**: the share of the last message read from the prompt cache and the time before it lapses (1 hour on a subscription, 5 minutes on an API key, inferred). Yellow under 10 minutes, "missed" with its cause, red "expired" with `/compact` on a large context.
 - **Cost**: the session cost as `/cost` totals it, and what the last prompt added. On a subscription, an API-price equivalent, not a bill.
@@ -21,7 +22,7 @@ One band above the Claude Code prompt: the context in tokens, your 5-hour and 7-
 In the terminal:
 
 ```
-☂ 634k ▃▆▂█▃▄▂▆ ▲ +6.3k │ 5h ━━━━━━╍─ 74% · 24 min → 18:20 │ 7d ━━━━━─── 65% · 2d20h │ cache 98% · 52 min │ ≈ $41.07 (+$0.58) │ 2 agents
+☂ 634k ▃▆▂█▃▄▂▆ ▲ +6.3k │ 97 tok/s │ 5h ━━━━━━╍─ 74% · 24 min → 18:20 │ 7d ━━━━━─── 65% · 2d20h │ cache 98% · 52 min │ ≈ $41.07 (+$0.58) │ 2 agents
 ```
 
 Labels in English or French: `auto` follows `LC_ALL`, `LC_MESSAGES` or `LANG`, otherwise pick `en` or `fr` in the **Language** option (`/config`).
