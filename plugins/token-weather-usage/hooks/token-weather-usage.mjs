@@ -192,14 +192,33 @@ let savedColumns = null;
 const SEP = "│";
 const TEXT_CELLS = 8;
 const GAUGE = { width: 72, height: 9 };
-// Fork: the app band comes in three levels, richest first, and the first that fits on one row is
-// drawn: full; compact (the details move into tooltips, shorter gauges, fewer turn bars); tight
-// (also no turn bars, no 5-hour time left, no coin). Widths are estimated in pixels, measured in
-// the Code tab: ~6.8 px a character, 16 px icons, 8.5 px between parts and pills, 18 px of padding
-// and border a pill. bodyColumns counts code-font cells of ~7.5 px, taken a little short, and a
-// margin is kept for the band's own padding: a band too wide for its row is the error to avoid.
-const PX = { char: 6.8, icon: 16, small: 14, weather: 15, gap: 8.5, pill: 18, rule: 4, cell: 7.4, margin: 40 };
-const COMPACT = { gauge: 40, bars: 6 };
+// Fork: the app band shows as much as fits on one row. It starts from every detail and drops
+// them one at a time, least useful first (DROPS), until its estimated width fits; the room left
+// lengthens the gauges, and the pills grow to end the row flush. A dropped detail stays in a
+// tooltip. Widths are estimated in pixels, measured in the Code tab: ~6.8 px a character, 16 px
+// icons, 8.5 px between parts and pills, 18 px of padding and border a pill; bodyColumns counts
+// cells of ~8.1 px (95 cells across a 768 px band), taken a little short, less the band's padding.
+const PX = { char: 6.8, icon: 16, small: 14, weather: 15, gap: 8.5, pill: 18, rule: 4, cell: 8, margin: 40 };
+const FULL_DETAIL = { lastPrompt: true, resetClock: true, cacheWord: true, limitIcons: true, speedIcon: true, trend: true, resetAt: true, approx: true, gauge: GAUGE.width, weekLeft: true, bars: TURN_BARS, fiveLeft: true, coin: true };
+const DROPS = [
+  { lastPrompt: false }, // the last prompt's cost, next to the session's
+  { resetClock: false }, // the clock before each reset time
+  { cacheWord: false }, // "cache", and a miss's cause
+  { limitIcons: false }, // the gauge and calendar before 5h and 7d
+  { speedIcon: false }, // the stopwatch
+  { trend: false }, // the last prompt's change in tokens
+  { resetAt: false }, // the 5-hour reset time (its time left stays)
+  { approx: false }, // the "≈" before the cost
+  { gauge: 40 }, // shorter gauges
+  { weekLeft: false }, // the 7-day time left
+  { bars: 6 }, // fewer turn bars
+  { bars: 0 }, // no turn bars
+  { fiveLeft: false }, // the 5-hour time left
+  { coin: false }, // the coin
+];
+// The band of unknown width: the drops through fewer turn bars.
+const UNKNOWN_DROPS = 11;
+const MAX_GAUGE = 140;
 const TONES = {
   calm: { svg: "#3fa66b", text: "green" },
   fast: { svg: "#d9962b", text: "yellow" },
@@ -652,18 +671,20 @@ function divider(Text, key) {
   return Text({ key, dimColor: true, children: SEP });
 }
 
-function gaugeBlock({ Box, Text, Svg }, mode, g, level = 0) {
+function gaugeBlock({ Box, Text, Svg }, mode, g, detail = null) {
   // The bar carries the color; the text stays in the theme's color, readable everywhere.
   const color = ICON_COLORS[g.kind] ?? ICON_COLORS.spend_limit;
   const parts = [];
-  if (level > 0) {
-    // Fork, compact app band: no icon, a shorter gauge whose tooltip carries the reset, then for
-    // the 5-hour window the time left (not in the tight band).
+  if (detail) {
+    // Fork, app band: what the detail keeps; the gauge's tooltip carries the whole reading.
     const title = [T.icons[g.kind] ?? g.label, g.value, g.when ? `${T.icons.reset} ${g.when}` : ""].filter(Boolean).join(" · ");
+    if (detail.limitIcons) parts.push(icon(Svg, "k", LIMIT_ICONS[g.kind] ?? "coin", color, T.icons[g.kind] ?? g.label));
     parts.push(Text({ key: "l", children: g.label }));
-    parts.push(Svg({ key: "g", source: svgGauge(g, COMPACT.gauge, title), alt: T.gaugeAlt(g.label, g.value), width: COMPACT.gauge, height: GAUGE.height, isInteractive: true }));
+    parts.push(Svg({ key: "g", source: svgGauge(g, detail.gauge, title), alt: T.gaugeAlt(g.label, g.value), width: detail.gauge, height: GAUGE.height, isInteractive: true }));
     parts.push(Text(g.tone === "alert" ? { key: "v", bold: true, color: TONES.alert.text, children: g.value } : { key: "v", bold: true, children: g.value }));
-    if (level === 1 && g.kind === "five_hour" && g.timeLeft) parts.push(Text({ key: "d", dimColor: true, children: g.timeLeft }));
+    const when = whenShown(g, detail);
+    if (when && detail.resetClock) parts.push(divider(Text, "s"), icon(Svg, "i", "clock", color, T.icons.reset, SMALL_ICON));
+    if (when) parts.push(Text({ key: "d", dimColor: true, children: when }));
     return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts };
   }
   if (mode === "svg") parts.push(icon(Svg, "k", LIMIT_ICONS[g.kind] ?? "coin", color, T.icons[g.kind] ?? g.label));
@@ -677,17 +698,19 @@ function gaugeBlock({ Box, Text, Svg }, mode, g, level = 0) {
   return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts };
 }
 
-function cacheBlock({ Text, Svg }, mode, state, level = 0) {
+function cacheBlock({ Text, Svg }, mode, state, detail = null) {
   const parts = [];
-  if (level > 0) {
-    // Fork, compact app band: the bolt's tooltip says "cache" and the whole detail; a miss shows
-    // "missed" alone, its cause in the tooltip.
+  if (detail) {
+    // Fork, app band: the bolt's tooltip carries the whole reading; without the "cache" label, a
+    // miss shows "missed" alone.
     const title = [T.icons.cache, state.value, state.detail].filter(Boolean).join(" · ");
     parts.push(tipIcon(Svg, "i", "bolt", ICON_COLORS[state.tone] ?? ICON_COLORS.calm, T.icons.cache, title));
+    if (detail.cacheWord) parts.push(Text({ key: "l", children: T.cache }));
     const valueColor = state.tone === "alert" ? TONES.alert.text : state.tone === "fast" && !state.urgent ? TONES.fast.text : undefined;
     parts.push(Text(state.tone === "none" ? { key: "v", dimColor: true, children: state.value } : { key: "v", bold: true, ...(valueColor ? { color: valueColor } : {}), children: state.value }));
-    const detail = state.short ?? state.detail;
-    if (detail) parts.push(Text(state.urgent ? { key: "d", bold: true, color: TONES.fast.text, children: detail } : { key: "d", dimColor: true, children: detail }));
+    const shown = detail.cacheWord ? state.detail : state.short ?? state.detail;
+    if (shown && detail.cacheWord) parts.push(divider(Text, "s"));
+    if (shown) parts.push(Text(state.urgent ? { key: "d", bold: true, color: TONES.fast.text, children: shown } : { key: "d", dimColor: true, children: shown }));
     return { key: "cache", tint: TINTS[state.tone] ?? TINTS.calm, parts };
   }
   if (mode === "svg") {
@@ -704,6 +727,31 @@ function cacheBlock({ Text, Svg }, mode, state, level = 0) {
   }
   const tint = TINTS[state.tone] ?? TINTS.calm;
   return { key: "cache", tint, parts };
+}
+
+// Fork: a window's time as the app band shows it: for 5 hours the time left and the reset time,
+// or the time left alone; for 7 days the time left; nothing once dropped.
+function whenShown(g, detail) {
+  if (!g.when) return "";
+  if (g.kind === "five_hour") return detail.fiveLeft ? (detail.resetAt ? g.when : g.timeLeft) : "";
+  return detail.weekLeft ? g.when : "";
+}
+
+// Fork: the richest app band that fits in `columns` cells, its gauges lengthened by the room left.
+function detailFor(gauges, cacheNow, columns) {
+  let detail = { ...FULL_DETAIL };
+  if (columns === null) {
+    for (const drop of DROPS.slice(0, UNKNOWN_DROPS)) detail = { ...detail, ...drop };
+    return detail;
+  }
+  const room = columns * PX.cell - PX.margin;
+  for (const drop of DROPS) {
+    if (pillsWidth(gauges, cacheNow, detail) <= room) break;
+    detail = { ...detail, ...drop };
+  }
+  const spare = room - pillsWidth(gauges, cacheNow, detail);
+  if (spare > 0 && gauges.length > 0) detail.gauge = Math.min(MAX_GAUGE, detail.gauge + Math.floor(spare / gauges.length));
+  return detail;
 }
 
 // ---------- Limits: gauges ----------
@@ -762,33 +810,30 @@ function drawLine(elements, surface, columns, now) {
   // Drawn bars in the app; in the terminal, characters when the line fits, otherwise no bar or detail.
   let mode = "svg";
   if (!desktop) mode = textWidth(gauges, cacheNow) <= columns - RESERVED_COLUMNS ? "text" : "none";
-  // Fork: in the app, the richest band that fits on one row; compact when the width is unknown.
-  let level = 0;
-  if (desktop && columns === null) level = 1;
-  else if (desktop) while (level < 2 && pillsWidth(gauges, cacheNow, level) > columns * PX.cell - PX.margin) level++;
+  // Fork: in the app, as much detail as fits on one row (see DROPS); null in the terminal.
+  const detail = desktop ? detailFor(gauges, cacheNow, columns) : null;
 
   const blocks = [];
   if (readings.length > 0) {
     const cur = readings[readings.length - 1];
     const f = forecastFor(cur.percent);
     const trend = trendWord();
-    // Fork: in a compact band the last prompt's change moves into the weather icon's tooltip.
-    const title = T.contextAlt(T.weather[f.id], T.percent(cur.percent), short(cur.window)) + (level > 0 && trend ? ` · ${trend}` : "");
+    // Fork: a trend dropped from the app band moves into the weather icon's tooltip.
+    const title = T.contextAlt(T.weather[f.id], T.percent(cur.percent), short(cur.window)) + (detail && !detail.trend && trend ? ` · ${trend}` : "");
     const icon = desktop
       ? Svg({ key: "icon", source: weatherSvg(f.id, title), alt: title, width: WEATHER_ICON_SIZE, height: WEATHER_ICON_SIZE, isInteractive: true })
       : Text({ key: "icon", color: f.color, bold: true, children: f.icon });
     const parts = [icon, Text({ key: "tokens", bold: true, children: short(cur.tokens) })];
     // A single reading draws no trend: the bars wait for the second turn.
-    if (readings.length >= 2 && level === 1) {
-      const n = turnDeltas(COMPACT.bars).length;
-      parts.push(Svg({ key: "spark", source: barsSvg(SPARK_COLORS[f.color] ?? SPARK_COLORS.blue, COMPACT.bars), alt: T.turnsAlt(n), width: barsWidth(n), height: SPARK.height }));
-    } else if (readings.length >= 2 && level === 0) {
-      if (desktop) {
-        parts.push(divider(Text, "s"));
-        parts.push(Svg({ key: "spark", source: barsSvg(SPARK_COLORS[f.color] ?? SPARK_COLORS.blue), alt: T.turnsAlt(turnDeltas().length), width: barsWidth(turnDeltas().length), height: SPARK.height }));
-      } else {
-        parts.push(Box({ key: "spark", flexDirection: "row", children: chartText(Text, f.color) }));
+    if (readings.length >= 2 && detail) {
+      if (detail.trend) parts.push(divider(Text, "s"));
+      if (detail.bars > 0) {
+        const n = turnDeltas(detail.bars).length;
+        parts.push(Svg({ key: "spark", source: barsSvg(SPARK_COLORS[f.color] ?? SPARK_COLORS.blue, detail.bars), alt: T.turnsAlt(n), width: barsWidth(n), height: SPARK.height }));
       }
+      if (detail.trend && trend) parts.push(Text({ key: "d", dimColor: true, children: trend }));
+    } else if (readings.length >= 2) {
+      parts.push(Box({ key: "spark", flexDirection: "row", children: chartText(Text, f.color) }));
       if (trend) parts.push(Text({ key: "d", dimColor: true, children: trend }));
     }
     blocks.push({ key: "context", tint: TINTS.context, parts });
@@ -797,21 +842,20 @@ function drawLine(elements, surface, columns, now) {
   const rate = speedRate();
   if (rate !== null) {
     const parts = [];
-    // The tooltip says what the rate was measured over; a compact band has no stopwatch.
-    if (desktop && level === 0) parts.push(tipIcon(Svg, "i", "stopwatch", ICON_COLORS.speed, T.icons.speed, T.speedAlt(short(speed.tokens), (speed.ms / 1000).toFixed(1))));
+    // The stopwatch's tooltip says what the rate was measured over.
+    if (detail?.speedIcon) parts.push(tipIcon(Svg, "i", "stopwatch", ICON_COLORS.speed, T.icons.speed, T.speedAlt(short(speed.tokens), (speed.ms / 1000).toFixed(1))));
     parts.push(Text({ key: "v", bold: true, children: speedValue(rate) }), Text({ key: "u", dimColor: true, children: T.speed }));
     blocks.push({ key: "speed", tint: TINTS.speed, parts });
   }
-  for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g, level));
-  if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow, level));
-  // Fork, compact app band: the cost alone, the last prompt's share in the coin's tooltip; no coin when tight.
-  if (cost !== null && cost >= 0.005 && level > 0) {
+  for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g, detail));
+  if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow, detail));
+  // Fork, app band: the cost as the detail keeps it; the coin's tooltip carries the last prompt's share.
+  if (cost !== null && cost >= 0.005 && detail) {
+    const share = lastPrompt !== null && lastPrompt >= 0.005;
     const parts = [];
-    if (level === 1) {
-      const share = lastPrompt !== null && lastPrompt >= 0.005 ? ` · ${T.icons.lastPrompt} ${T.lastPrompt(lastPrompt)}` : "";
-      parts.push(tipIcon(Svg, "i", "coin", ICON_COLORS.cost, T.icons.cost, `${T.icons.cost} ${T.cost(cost)}${share}`));
-    }
-    parts.push(Text({ key: "v", bold: true, children: T.costShort(cost) }));
+    if (detail.coin) parts.push(tipIcon(Svg, "i", "coin", ICON_COLORS.cost, T.icons.cost, `${T.icons.cost} ${T.cost(cost)}${share ? ` · ${T.icons.lastPrompt} ${T.lastPrompt(lastPrompt)}` : ""}`));
+    parts.push(Text({ key: "v", bold: true, children: detail.approx ? T.cost(cost) : T.costShort(cost) }));
+    if (share && detail.lastPrompt) parts.push(divider(Text, "s"), icon(Svg, "p", "prompt", ICON_COLORS.cost, T.icons.lastPrompt, SMALL_ICON), Text({ key: "d", dimColor: true, children: T.lastPrompt(lastPrompt) }));
     blocks.push({ key: "cost", tint: TINTS.cost, parts });
   }
   // The cost goes first when the terminal is short of room.
@@ -844,7 +888,8 @@ function drawLine(elements, surface, columns, now) {
     // after it, takes the vertical part back.
     // Fork: a pill never shrinks (shrunk, its text wrapped onto extra lines or spilled into the
     // next pill); when the band is narrower than the pills, they wrap onto a second row instead.
-    const pills = blocks.map((b) => Box({ ...row(b), flexShrink: 0, paddingX: 1, paddingY: 0, borderStyle: "round", borderColor: b.tint[1], backgroundColor: b.tint[0] }));
+    // Pills grow, their content centered, so the row ends flush with the band.
+    const pills = blocks.map((b) => Box({ ...row(b), flexGrow: 1, flexShrink: 0, justifyContent: "center", paddingX: 1, paddingY: 0, borderStyle: "round", borderColor: b.tint[1], backgroundColor: b.tint[0] }));
     return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingX: 1, children: pills });
   }
   const children = [];
@@ -855,30 +900,34 @@ function drawLine(elements, surface, columns, now) {
   return Box({ flexDirection: "row", alignItems: "center", paddingX: 1, children });
 }
 
-// Fork: width of the app band at a level, in pixels (see PX); drawLine's blocks, part for part.
-function pillsWidth(gauges, cacheNow, level) {
+// Fork: width of the app band with a detail, in pixels (see PX); drawLine's blocks, part for part.
+function pillsWidth(gauges, cacheNow, detail) {
   const text = (s) => String(s).length * PX.char;
   const pill = (parts) => PX.pill + parts.reduce((sum, w) => sum + w, 0) + PX.gap * Math.max(0, parts.length - 1);
   const pills = [];
   if (readings.length > 0) {
     const parts = [PX.weather, text(short(readings[readings.length - 1].tokens))];
-    if (readings.length >= 2 && level === 0) parts.push(PX.rule, barsWidth(turnDeltas().length), text(trendWord()));
-    else if (readings.length >= 2 && level === 1) parts.push(barsWidth(turnDeltas(COMPACT.bars).length));
+    if (readings.length >= 2) {
+      const trend = trendWord();
+      if (detail.trend) parts.push(PX.rule);
+      if (detail.bars > 0) parts.push(barsWidth(turnDeltas(detail.bars).length));
+      if (detail.trend && trend) parts.push(text(trend));
+    }
     pills.push(pill(parts));
   }
   const rate = speedRate();
-  if (rate !== null) pills.push(pill([...(level === 0 ? [PX.icon] : []), text(speedValue(rate)), text(T.speed)]));
+  if (rate !== null) pills.push(pill([...(detail.speedIcon ? [PX.icon] : []), text(speedValue(rate)), text(T.speed)]));
   for (const g of gauges) {
-    if (level === 0) pills.push(pill([PX.icon, text(g.label), GAUGE.width, text(g.value), ...(g.when ? [PX.rule, PX.small, text(g.when)] : [])]));
-    else pills.push(pill([text(g.label), COMPACT.gauge, text(g.value), ...(level === 1 && g.kind === "five_hour" && g.timeLeft ? [text(g.timeLeft)] : [])]));
+    const when = whenShown(g, detail);
+    pills.push(pill([...(detail.limitIcons ? [PX.icon] : []), text(g.label), detail.gauge, text(g.value), ...(when && detail.resetClock ? [PX.rule, PX.small] : []), ...(when ? [text(when)] : [])]));
   }
   if (cacheNow) {
-    if (level === 0) pills.push(pill([PX.icon, text(T.cache), text(cacheNow.value), ...(cacheNow.detail ? [PX.rule, text(cacheNow.detail)] : [])]));
-    else pills.push(pill([PX.icon, text(cacheNow.value), ...(cacheNow.short ?? cacheNow.detail ? [text(cacheNow.short ?? cacheNow.detail)] : [])]));
+    const shown = detail.cacheWord ? cacheNow.detail : cacheNow.short ?? cacheNow.detail;
+    pills.push(pill([PX.icon, ...(detail.cacheWord ? [text(T.cache)] : []), text(cacheNow.value), ...(shown && detail.cacheWord ? [PX.rule] : []), ...(shown ? [text(shown)] : [])]));
   }
   if (cost !== null && cost >= 0.005) {
-    if (level === 0) pills.push(pill([PX.icon, text(T.cost(cost)), ...(lastPrompt !== null && lastPrompt >= 0.005 ? [PX.rule, PX.small, text(T.lastPrompt(lastPrompt))] : [])]));
-    else pills.push(pill([...(level === 1 ? [PX.icon] : []), text(T.costShort(cost))]));
+    const share = lastPrompt !== null && lastPrompt >= 0.005 && detail.lastPrompt;
+    pills.push(pill([...(detail.coin ? [PX.icon] : []), text(detail.approx ? T.cost(cost) : T.costShort(cost)), ...(share ? [PX.rule, PX.small, text(T.lastPrompt(lastPrompt))] : [])]));
   }
   if (agents.length > 0) pills.push(pill([PX.icon, text(T.agents(agents.length))]));
   return pills.reduce((sum, w) => sum + w, 0) + PX.gap * Math.max(0, pills.length - 1);

@@ -506,62 +506,65 @@ async function app($: any, props: Record<string, unknown>) {
   return { texts, svgs, pills: boxes.filter((b) => b.props?.backgroundColor), band: boxes.find((b) => b.props?.flexWrap) };
 }
 
-test("compact: a band about 100 cells wide moves the details into tooltips", async ($, on) => {
+test("fill: a wide band keeps every detail and lengthens the gauges", async ($, on) => {
   await populated($, on);
-  const wide = await app($, { bodyColumns: 200 });
-  // Wide: the full band, reset clocks and the cache label included.
-  expect(wide.svgs.some((s) => s.props?.alt === "Resets in")).toBe(true);
-  expect(wide.texts).toContain("cache");
-  expect(wide.texts).toContain("≈ $4.84");
-  const { texts, svgs, pills, band } = await app($, { bodyColumns: 100 });
-  // Same six pills, on one row.
-  expect(pills.length).toBe(6);
-  expect(band?.props?.flexWrap).toBe("wrap");
-  // Limits: label, a short gauge with the reset in its tooltip, the share; the 5-hour time left only.
-  expect(svgs.some((s) => s.props?.alt === "Resets in" || s.props?.alt === "5-hour limit")).toBe(false);
+  const { texts, svgs, pills } = await app($, { bodyColumns: 200 });
+  for (const t of ["cache", "≈ $4.84", "+$0.84", "▲ +20k", "50", "tok/s", "98%", "1h00", "3d00h"]) expect(texts).toContain(t);
+  expect(texts.some((t: string) => t.startsWith("3h00 → "))).toBe(true);
+  for (const a of ["Resets in", "5-hour limit", "7-day limit", "Output speed", "Last prompt", "Session cost"]) expect(svgs.some((s) => s.props?.alt === a)).toBe(true);
   const gauges = svgs.filter((s) => String(s.props?.alt ?? "").includes(" used"));
   expect(gauges.length).toBe(2);
   for (const g of gauges) {
+    expect(g.props?.width).toBeGreaterThan(72);
+    expect(g.props?.width).toBeLessThanOrEqual(140);
     expect(g.props?.isInteractive).toBe(true);
-    expect(g.props?.width).toBe(40);
     expect(String(g.props?.source)).toContain("color-scheme:light dark");
   }
-  expect(String(gauges.find((g) => g.props?.alt.startsWith("5h"))?.props?.source)).toContain("Resets in 3h00 → ");
-  expect(texts).toContain("3h00");
-  expect(texts.some((t: string) => t.includes("→"))).toBe(false);
-  expect(texts.some((t: string) => /^\d+d\d\dh$/.test(t))).toBe(false);
-  // Cache: no label, the bolt's tooltip says it.
-  expect(texts).not.toContain("cache");
-  expect(texts).toContain("98%");
-  const bolt = svgs.find((s) => s.props?.alt === "Prompt cache");
-  expect(String(bolt?.props?.source)).toContain("<title>Prompt cache · 98% · 1h00</title>");
-  // Cost without "≈", the last prompt in the coin's tooltip.
-  expect(texts).toContain("$4.84");
-  expect(texts).not.toContain("+$0.84");
-  expect(String(svgs.find((s) => s.props?.alt === "Session cost")?.props?.source)).toContain("Last prompt +$0.84");
-  // Speed without the stopwatch; the trend in the weather icon's tooltip.
-  expect(texts).toContain("50");
-  expect(texts).toContain("tok/s");
-  expect(svgs.some((s) => s.props?.alt === "Output speed")).toBe(false);
-  expect(texts).not.toContain("▲ +20k");
-  expect(svgs.some((s) => String(s.props?.alt).includes("▲ +20k"))).toBe(true);
+  // The pills grow so the row ends flush.
+  expect(pills.length).toBe(6);
+  for (const p of pills) expect(p.props?.flexGrow).toBe(1);
 });
 
-test("tight: a narrower band drops the turn bars, the 5-hour time left and the coin", async ($, on) => {
+test("fill: at 95 cells the least useful details move into tooltips first", async ($, on) => {
+  await populated($, on);
+  const { texts, svgs, pills, band } = await app($, { bodyColumns: 95 });
+  expect(pills.length).toBe(6);
+  expect(band?.props?.flexWrap).toBe("wrap");
+  // Kept: the times left, the cost, the speed, the cache reading, the turn bars, the coin.
+  for (const t of ["3h00", "3d00h", "$4.84", "50", "tok/s", "98%", "1h00"]) expect(texts).toContain(t);
+  expect(svgs.some((s) => String(s.props?.alt).startsWith("Tokens added"))).toBe(true);
+  // Dropped, each into a tooltip: the last prompt, the reset clocks and reset time, "cache", the
+  // limit icons, the stopwatch, the trend, the "≈".
+  for (const t of ["cache", "≈ $4.84", "+$0.84", "▲ +20k"]) expect(texts).not.toContain(t);
+  expect(texts.some((t: string) => t.includes("→"))).toBe(false);
+  for (const a of ["Resets in", "5-hour limit", "Output speed", "Last prompt"]) expect(svgs.some((s) => s.props?.alt === a)).toBe(false);
+  expect(String(svgs.find((s) => s.props?.alt === "Session cost")?.props?.source)).toContain("Last prompt +$0.84");
+  expect(String(svgs.find((s) => s.props?.alt === "Prompt cache")?.props?.source)).toContain("<title>Prompt cache · 98% · 1h00</title>");
+  expect(svgs.some((s) => String(s.props?.alt).includes("▲ +20k"))).toBe(true);
+  const gauges = svgs.filter((s) => String(s.props?.alt ?? "").includes(" used"));
+  expect(String(gauges.find((g) => g.props?.alt.startsWith("5h"))?.props?.source)).toContain("Resets in 3h00 → ");
+  // Shorter gauges, lengthened by the room left, the same for both.
+  expect(gauges[0].props?.width).toBe(gauges[1].props?.width);
+  expect(gauges[0].props?.width).toBeGreaterThanOrEqual(40);
+  expect(gauges[0].props?.width).toBeLessThan(72);
+});
+
+test("fill: a narrow band drops the turn bars, the 5-hour time left and the coin last", async ($, on) => {
   await populated($, on);
   const { texts, svgs, pills } = await app($, { bodyColumns: 60 });
   expect(pills.length).toBe(6);
   expect(svgs.some((s) => String(s.props?.alt).startsWith("Tokens added"))).toBe(false);
   expect(texts).not.toContain("3h00");
   expect(svgs.some((s) => s.props?.alt === "Session cost")).toBe(false);
-  expect(texts).toContain("$4.84");
-  expect(texts).toContain("32%");
+  for (const t of ["$4.84", "32%", "59%", "50"]) expect(texts).toContain(t);
 });
 
-test("compact: an app band of unknown width is compact", async ($, on) => {
+test("fill: an app band of unknown width is compact", async ($, on) => {
   await populated($, on);
   const { texts, svgs } = await app($, {});
   expect(texts).not.toContain("cache");
   expect(texts).toContain("3h00");
+  expect(texts).not.toContain("3d00h");
   expect(svgs.some((s) => String(s.props?.alt).startsWith("Tokens added"))).toBe(true);
+  for (const g of svgs.filter((s) => String(s.props?.alt ?? "").includes(" used"))) expect(g.props?.width).toBe(40);
 });
