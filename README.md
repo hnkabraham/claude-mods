@@ -37,7 +37,7 @@ Stop hitting your Claude limit by surprise. One band above the prompt shows how 
 - **Cost**: what the session cost, as `/cost` totals it, and what the last prompt added (its subagents included). On a subscription it is the API-price equivalent, not a bill, hence the "≈".
 - **Agents**: shown only while subagents run; hover the robot for the type and task of each. Background shell commands are not counted (Claude Code does not expose them to mods).
 
-In the desktop app each block is a tinted pill with its icon. In the terminal the same blocks sit on one line, split by a thin rule:
+In the desktop app each block is a tinted pill with its icon. Fork: when the pills would not fit on one row, the band turns compact (the reset clocks, the trend, the word "cache" and the last prompt's cost move into the icons' and gauges' tooltips, and the gauges get shorter), then tight (no turn bars, no 5-hour time left, no coin); only past that do the pills wrap onto a second row. In the terminal the same blocks sit on one line, split by a thin rule:
 
 ```
 ☂ 634k ▃▆▂█▃▄▂▆ ▲ +6.3k │ 97 tok/s │ 5h ━━━━━━╍─ 74% · 24 min → 18:20 │ 7d ━━━━━─── 65% · 2d20h │ cache 98% · 52 min │ ≈ $41.07 (+$0.58) │ 2 agents

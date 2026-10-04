@@ -473,3 +473,95 @@ test("speed: one decimal under 10 tok/s, French unit unchanged", async ($, on) =
   expect(texts).toContain("7.4");
   expect(texts).toContain("tok/s");
 });
+
+// ---------- Compact app band (fork) ----------
+
+// Everything the band can show at once: two turns, speed, a cache hit, the cost and the last prompt.
+async function populated($: any, on: any) {
+  const clock = mock.clock(on, { now: NOW });
+  mock.store(on, {});
+  mock.env(on, {});
+  on("session.id", () => ({ value: "session-1" }));
+  on("session.start", (_$: any, e: any) => ({ cwd: e.cwd ?? "/tmp" }));
+  on("ui.invalidate", () => ({ value: undefined }));
+  on("ui.render", ($: any, e: any) => $.ui.resolve(e).Box({ children: [] }));
+  on("turn.complete", () => ({ text: "" }));
+  const costs = [4.0, 4.84];
+  let call = 0;
+  on("session.usage", () => {
+    const i = Math.min(call++, 1);
+    return { value: { startedAt: NOW, context: { tokens: 107_000 + i * 20_000, window: 1_000_000, percent: 11 + i * 2 }, rateLimits: LIMITS, cost: { usd: costs[i] } } };
+  });
+  streamingStep(on, clock, [{ ms: 4_000, output: 200 }]);
+  await $.session.start({ source: "startup", cwd: "/tmp" } as any);
+  await streamed($, "t1");
+  await ($ as any).turn.complete({ answer: "ok" } as any);
+}
+
+async function app($: any, props: Record<string, unknown>) {
+  const ui = await $.ui.mount({ plugin: "token-weather-usage", surface: "desktop", component: "AbovePrompt", props: props as any });
+  const texts = (await ui.findAll({ type: "Text" })).map((t: any) => t.text);
+  const svgs = (await ui.findAll({ type: "Svg" })) as any[];
+  const boxes = (await ui.findAll({ type: "Box" })) as any[];
+  return { texts, svgs, pills: boxes.filter((b) => b.props?.backgroundColor), band: boxes.find((b) => b.props?.flexWrap) };
+}
+
+test("compact: a band about 100 cells wide moves the details into tooltips", async ($, on) => {
+  await populated($, on);
+  const wide = await app($, { bodyColumns: 200 });
+  // Wide: the full band, reset clocks and the cache label included.
+  expect(wide.svgs.some((s) => s.props?.alt === "Resets in")).toBe(true);
+  expect(wide.texts).toContain("cache");
+  expect(wide.texts).toContain("≈ $4.84");
+  const { texts, svgs, pills, band } = await app($, { bodyColumns: 100 });
+  // Same six pills, on one row.
+  expect(pills.length).toBe(6);
+  expect(band?.props?.flexWrap).toBe("wrap");
+  // Limits: label, a short gauge with the reset in its tooltip, the share; the 5-hour time left only.
+  expect(svgs.some((s) => s.props?.alt === "Resets in" || s.props?.alt === "5-hour limit")).toBe(false);
+  const gauges = svgs.filter((s) => String(s.props?.alt ?? "").includes(" used"));
+  expect(gauges.length).toBe(2);
+  for (const g of gauges) {
+    expect(g.props?.isInteractive).toBe(true);
+    expect(g.props?.width).toBe(40);
+    expect(String(g.props?.source)).toContain("color-scheme:light dark");
+  }
+  expect(String(gauges.find((g) => g.props?.alt.startsWith("5h"))?.props?.source)).toContain("Resets in 3h00 → ");
+  expect(texts).toContain("3h00");
+  expect(texts.some((t: string) => t.includes("→"))).toBe(false);
+  expect(texts.some((t: string) => /^\d+d\d\dh$/.test(t))).toBe(false);
+  // Cache: no label, the bolt's tooltip says it.
+  expect(texts).not.toContain("cache");
+  expect(texts).toContain("98%");
+  const bolt = svgs.find((s) => s.props?.alt === "Prompt cache");
+  expect(String(bolt?.props?.source)).toContain("<title>Prompt cache · 98% · 1h00</title>");
+  // Cost without "≈", the last prompt in the coin's tooltip.
+  expect(texts).toContain("$4.84");
+  expect(texts).not.toContain("+$0.84");
+  expect(String(svgs.find((s) => s.props?.alt === "Session cost")?.props?.source)).toContain("Last prompt +$0.84");
+  // Speed without the stopwatch; the trend in the weather icon's tooltip.
+  expect(texts).toContain("50");
+  expect(texts).toContain("tok/s");
+  expect(svgs.some((s) => s.props?.alt === "Output speed")).toBe(false);
+  expect(texts).not.toContain("▲ +20k");
+  expect(svgs.some((s) => String(s.props?.alt).includes("▲ +20k"))).toBe(true);
+});
+
+test("tight: a narrower band drops the turn bars, the 5-hour time left and the coin", async ($, on) => {
+  await populated($, on);
+  const { texts, svgs, pills } = await app($, { bodyColumns: 60 });
+  expect(pills.length).toBe(6);
+  expect(svgs.some((s) => String(s.props?.alt).startsWith("Tokens added"))).toBe(false);
+  expect(texts).not.toContain("3h00");
+  expect(svgs.some((s) => s.props?.alt === "Session cost")).toBe(false);
+  expect(texts).toContain("$4.84");
+  expect(texts).toContain("32%");
+});
+
+test("compact: an app band of unknown width is compact", async ($, on) => {
+  await populated($, on);
+  const { texts, svgs } = await app($, {});
+  expect(texts).not.toContain("cache");
+  expect(texts).toContain("3h00");
+  expect(svgs.some((s) => String(s.props?.alt).startsWith("Tokens added"))).toBe(true);
+});

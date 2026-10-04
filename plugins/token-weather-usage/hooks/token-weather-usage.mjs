@@ -34,6 +34,7 @@ const TEXT = {
     causes: { model: "model changed", lapsed: "lapsed", prefix: "start changed" },
     underMinute: "< 1 min",
     cost: (usd) => `≈ $${usd.toFixed(2)}`,
+    costShort: (usd) => `$${usd.toFixed(2)}`,
     lastPrompt: (usd) => `+$${usd.toFixed(2)}`,
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
     speed: "tok/s",
@@ -54,6 +55,7 @@ const TEXT = {
     causes: { model: "modèle changé", lapsed: "délai dépassé", prefix: "début modifié" },
     underMinute: "< 1 min",
     cost: (usd) => `≈ ${usd.toFixed(2).replace(".", ",")} $`,
+    costShort: (usd) => `${usd.toFixed(2).replace(".", ",")} $`,
     lastPrompt: (usd) => `+${usd.toFixed(2).replace(".", ",")} $`,
     agents: (n) => (n === 1 ? "1 agent" : `${n} agents`),
     speed: "tok/s",
@@ -180,11 +182,24 @@ const MIN_STREAM_MS = 200;
 // { turnId, tokens, ms }: the latest turn's sums.
 let speed = null;
 
+// Fork, diagnostic: the app band's width in code-font cells as the app reports it, kept in the
+// store ("layout") so the pixel estimate behind the compact band can be checked against it.
+let desktopColumns = null;
+let savedColumns = null;
+
 // ---------- Layout ----------
 
 const SEP = "│";
 const TEXT_CELLS = 8;
 const GAUGE = { width: 72, height: 9 };
+// Fork: the app band comes in three levels, richest first, and the first that fits on one row is
+// drawn: full; compact (the details move into tooltips, shorter gauges, fewer turn bars); tight
+// (also no turn bars, no 5-hour time left, no coin). Widths are estimated in pixels, measured in
+// the Code tab: ~6.8 px a character, 16 px icons, 8.5 px between parts and pills, 18 px of padding
+// and border a pill. bodyColumns counts code-font cells of ~7.5 px, taken a little short, and a
+// margin is kept for the band's own padding: a band too wide for its row is the error to avoid.
+const PX = { char: 6.8, icon: 16, small: 14, weather: 15, gap: 8.5, pill: 18, rule: 4, cell: 7.4, margin: 40 };
+const COMPACT = { gauge: 40, bars: 6 };
 const TONES = {
   calm: { svg: "#3fa66b", text: "green" },
   fast: { svg: "#d9962b", text: "yellow" },
@@ -275,6 +290,14 @@ export function register(on, options) {
     cacheTicker = $.clock.every(10_000, async () => {
       const key = cacheText(cacheState(await $.clock.now()));
       const changed = await refreshAgents($);
+      if (desktopColumns !== savedColumns) {
+        savedColumns = desktopColumns;
+        try {
+          await $.store.set("layout", { columns: desktopColumns, at: await $.clock.now() });
+        } catch {
+          // Diagnostic only.
+        }
+      }
       if (key !== cacheKey || changed) {
         cacheKey = key;
         $.ui.invalidate("ui.render");
@@ -360,9 +383,10 @@ export function register(on, options) {
   on("ui.render", { component: "AbovePrompt" }, async ($, e, next) => {
     const props = e.props ?? e;
     if (props.hasSurvey || (readings.length === 0 && limits.list.length === 0)) return next(e);
+    if (e.surface === "desktop" && Number.isFinite(props.bodyColumns)) desktopColumns = props.bodyColumns;
     const elements = $.ui.resolve(e);
     const now = await $.clock.now();
-    const line = drawLine(elements, e.surface, props.bodyColumns ?? 80, now);
+    const line = drawLine(elements, e.surface, props.bodyColumns ?? (e.surface === "desktop" ? null : 80), now);
     // Mods placed after us draw below our line; an empty drawing adds no blank line.
     const below = await next(e);
     return isBlank(below) ? line : elements.Box({ flexDirection: "column", children: [line, below] });
@@ -462,7 +486,8 @@ function gaugeOf(limit, now) {
   const tone = used >= USED_ALERT || pace > PACE_ALERT ? "alert" : pace > 0 ? "fast" : "calm";
   let when = "";
   if (left !== null) when = limit.kind === "five_hour" ? `${duration(left)} → ${clockTime(resetMs)}` : duration(left);
-  return { kind: limit.kind, label: T.labels[limit.kind] ?? limit.kind, used, elapsed, tone, value: T.percent(Math.round(used)), when };
+  const timeLeft = left !== null ? duration(left) : "";
+  return { kind: limit.kind, label: T.labels[limit.kind] ?? limit.kind, used, elapsed, tone, value: T.percent(Math.round(used)), when, timeLeft };
 }
 
 // 3h02, 42 min, 2d23h (2j23h in French).
@@ -563,7 +588,7 @@ function cacheState(now) {
   const tokens = readings.length > 0 ? readings[readings.length - 1].tokens : promptOf(cache);
   if (left <= 0) return { tone: "alert", value: T.expired, detail: tokens >= COMPACT_AT ? "/compact" : "" };
   const value = T.percent(hitOf(cache));
-  if (cache.cause) return { tone: "fast", value, detail: `${T.missed} · ${T.causes[cache.cause]}` };
+  if (cache.cause) return { tone: "fast", value, detail: `${T.missed} · ${T.causes[cache.cause]}`, short: T.missed };
   const time = left < MINUTE ? T.underMinute : duration(left);
   return left < CACHE_SOON ? { tone: "fast", value, detail: time, urgent: true } : { tone: "calm", value, detail: time };
 }
@@ -617,14 +642,30 @@ function icon(Svg, key, name, color, alt, size = ICON_SIZE) {
   return Svg({ key, source, alt, width: size, height: size });
 }
 
+// Fork: an icon with a tooltip; interactive, so its frame declares a color scheme.
+function tipIcon(Svg, key, name, color, alt, title) {
+  const source = `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_SIZE}" height="${ICON_SIZE}" viewBox="0 0 24 24">${FRAME_SCHEME}<title>${escapeXml(title)}</title>${ICONS[name](color)}</svg>`;
+  return Svg({ key, source, alt, width: ICON_SIZE, height: ICON_SIZE, isInteractive: true });
+}
+
 function divider(Text, key) {
   return Text({ key, dimColor: true, children: SEP });
 }
 
-function gaugeBlock({ Box, Text, Svg }, mode, g) {
+function gaugeBlock({ Box, Text, Svg }, mode, g, level = 0) {
   // The bar carries the color; the text stays in the theme's color, readable everywhere.
   const color = ICON_COLORS[g.kind] ?? ICON_COLORS.spend_limit;
   const parts = [];
+  if (level > 0) {
+    // Fork, compact app band: no icon, a shorter gauge whose tooltip carries the reset, then for
+    // the 5-hour window the time left (not in the tight band).
+    const title = [T.icons[g.kind] ?? g.label, g.value, g.when ? `${T.icons.reset} ${g.when}` : ""].filter(Boolean).join(" · ");
+    parts.push(Text({ key: "l", children: g.label }));
+    parts.push(Svg({ key: "g", source: svgGauge(g, COMPACT.gauge, title), alt: T.gaugeAlt(g.label, g.value), width: COMPACT.gauge, height: GAUGE.height, isInteractive: true }));
+    parts.push(Text(g.tone === "alert" ? { key: "v", bold: true, color: TONES.alert.text, children: g.value } : { key: "v", bold: true, children: g.value }));
+    if (level === 1 && g.kind === "five_hour" && g.timeLeft) parts.push(Text({ key: "d", dimColor: true, children: g.timeLeft }));
+    return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts };
+  }
   if (mode === "svg") parts.push(icon(Svg, "k", LIMIT_ICONS[g.kind] ?? "coin", color, T.icons[g.kind] ?? g.label));
   parts.push(Text({ key: "l", children: g.label }));
   if (mode === "svg" && Svg) parts.push(Svg({ key: "g", source: svgGauge(g), alt: T.gaugeAlt(g.label, g.value), width: GAUGE.width, height: GAUGE.height }));
@@ -636,8 +677,19 @@ function gaugeBlock({ Box, Text, Svg }, mode, g) {
   return { key: "gauge-" + g.label, tint: TINTS[g.kind] ?? TINTS.spend_limit, parts };
 }
 
-function cacheBlock({ Text, Svg }, mode, state) {
+function cacheBlock({ Text, Svg }, mode, state, level = 0) {
   const parts = [];
+  if (level > 0) {
+    // Fork, compact app band: the bolt's tooltip says "cache" and the whole detail; a miss shows
+    // "missed" alone, its cause in the tooltip.
+    const title = [T.icons.cache, state.value, state.detail].filter(Boolean).join(" · ");
+    parts.push(tipIcon(Svg, "i", "bolt", ICON_COLORS[state.tone] ?? ICON_COLORS.calm, T.icons.cache, title));
+    const valueColor = state.tone === "alert" ? TONES.alert.text : state.tone === "fast" && !state.urgent ? TONES.fast.text : undefined;
+    parts.push(Text(state.tone === "none" ? { key: "v", dimColor: true, children: state.value } : { key: "v", bold: true, ...(valueColor ? { color: valueColor } : {}), children: state.value }));
+    const detail = state.short ?? state.detail;
+    if (detail) parts.push(Text(state.urgent ? { key: "d", bold: true, color: TONES.fast.text, children: detail } : { key: "d", dimColor: true, children: detail }));
+    return { key: "cache", tint: TINTS[state.tone] ?? TINTS.calm, parts };
+  }
   if (mode === "svg") {
     parts.push(icon(Svg, "i", "bolt", ICON_COLORS[state.tone] ?? ICON_COLORS.calm, T.icons.cache));
   }
@@ -675,8 +727,8 @@ function textGauge(Box, Text, g) {
 
 // Drawn gauge: solid bar up to the share used; the gap with elapsed time is hatched,
 // grey after the bar (margin left) or in the bar's color (ahead of time).
-function svgGauge(g) {
-  const { width, height } = GAUGE;
+function svgGauge(g, width = GAUGE.width, title = "") {
+  const { height } = GAUGE;
   const radius = height / 2;
   const used = (bound(g.used) / 100) * width;
   const time = g.elapsed === null ? used : (g.elapsed / 100) * width;
@@ -694,7 +746,9 @@ function svgGauge(g) {
   body += `<g clip-path="url(#${id}b)"><rect width="${Math.min(used, time).toFixed(1)}" height="${height}" fill="${color}"/>`;
   if (used > time) body += `<rect x="${time.toFixed(1)}" width="${(used - time).toFixed(1)}" height="${height}" fill="url(#${id}a)"/>`;
   body += `</g>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${defs}<g clip-path="url(#${id}t)">${body}</g></svg>`;
+  // Fork: a compact gauge carries the details in its tooltip; interactive, it declares a color scheme.
+  const head = title ? `${FRAME_SCHEME}<title>${escapeXml(title)}</title>` : "";
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${head}${defs}<g clip-path="url(#${id}t)">${body}</g></svg>`;
 }
 
 // ---------- Line ----------
@@ -708,25 +762,33 @@ function drawLine(elements, surface, columns, now) {
   // Drawn bars in the app; in the terminal, characters when the line fits, otherwise no bar or detail.
   let mode = "svg";
   if (!desktop) mode = textWidth(gauges, cacheNow) <= columns - RESERVED_COLUMNS ? "text" : "none";
+  // Fork: in the app, the richest band that fits on one row; compact when the width is unknown.
+  let level = 0;
+  if (desktop && columns === null) level = 1;
+  else if (desktop) while (level < 2 && pillsWidth(gauges, cacheNow, level) > columns * PX.cell - PX.margin) level++;
 
   const blocks = [];
   if (readings.length > 0) {
     const cur = readings[readings.length - 1];
     const f = forecastFor(cur.percent);
-    const title = T.contextAlt(T.weather[f.id], T.percent(cur.percent), short(cur.window));
+    const trend = trendWord();
+    // Fork: in a compact band the last prompt's change moves into the weather icon's tooltip.
+    const title = T.contextAlt(T.weather[f.id], T.percent(cur.percent), short(cur.window)) + (level > 0 && trend ? ` · ${trend}` : "");
     const icon = desktop
       ? Svg({ key: "icon", source: weatherSvg(f.id, title), alt: title, width: WEATHER_ICON_SIZE, height: WEATHER_ICON_SIZE, isInteractive: true })
       : Text({ key: "icon", color: f.color, bold: true, children: f.icon });
     const parts = [icon, Text({ key: "tokens", bold: true, children: short(cur.tokens) })];
     // A single reading draws no trend: the bars wait for the second turn.
-    if (readings.length >= 2) {
+    if (readings.length >= 2 && level === 1) {
+      const n = turnDeltas(COMPACT.bars).length;
+      parts.push(Svg({ key: "spark", source: barsSvg(SPARK_COLORS[f.color] ?? SPARK_COLORS.blue, COMPACT.bars), alt: T.turnsAlt(n), width: barsWidth(n), height: SPARK.height }));
+    } else if (readings.length >= 2 && level === 0) {
       if (desktop) {
         parts.push(divider(Text, "s"));
         parts.push(Svg({ key: "spark", source: barsSvg(SPARK_COLORS[f.color] ?? SPARK_COLORS.blue), alt: T.turnsAlt(turnDeltas().length), width: barsWidth(turnDeltas().length), height: SPARK.height }));
       } else {
         parts.push(Box({ key: "spark", flexDirection: "row", children: chartText(Text, f.color) }));
       }
-      const trend = trendWord();
       if (trend) parts.push(Text({ key: "d", dimColor: true, children: trend }));
     }
     blocks.push({ key: "context", tint: TINTS.context, parts });
@@ -735,19 +797,25 @@ function drawLine(elements, surface, columns, now) {
   const rate = speedRate();
   if (rate !== null) {
     const parts = [];
-    if (desktop) {
-      // The tooltip says what the rate was measured over.
-      const title = T.speedAlt(short(speed.tokens), (speed.ms / 1000).toFixed(1));
-      const source = `<svg xmlns="http://www.w3.org/2000/svg" width="${ICON_SIZE}" height="${ICON_SIZE}" viewBox="0 0 24 24">${FRAME_SCHEME}<title>${escapeXml(title)}</title>${ICONS.stopwatch(ICON_COLORS.speed)}</svg>`;
-      parts.push(Svg({ key: "i", source, alt: T.icons.speed, width: ICON_SIZE, height: ICON_SIZE, isInteractive: true }));
-    }
+    // The tooltip says what the rate was measured over; a compact band has no stopwatch.
+    if (desktop && level === 0) parts.push(tipIcon(Svg, "i", "stopwatch", ICON_COLORS.speed, T.icons.speed, T.speedAlt(short(speed.tokens), (speed.ms / 1000).toFixed(1))));
     parts.push(Text({ key: "v", bold: true, children: speedValue(rate) }), Text({ key: "u", dimColor: true, children: T.speed }));
     blocks.push({ key: "speed", tint: TINTS.speed, parts });
   }
-  for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g));
-  if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow));
+  for (const g of gauges) blocks.push(gaugeBlock(elements, mode, g, level));
+  if (cacheNow) blocks.push(cacheBlock(elements, mode, cacheNow, level));
+  // Fork, compact app band: the cost alone, the last prompt's share in the coin's tooltip; no coin when tight.
+  if (cost !== null && cost >= 0.005 && level > 0) {
+    const parts = [];
+    if (level === 1) {
+      const share = lastPrompt !== null && lastPrompt >= 0.005 ? ` · ${T.icons.lastPrompt} ${T.lastPrompt(lastPrompt)}` : "";
+      parts.push(tipIcon(Svg, "i", "coin", ICON_COLORS.cost, T.icons.cost, `${T.icons.cost} ${T.cost(cost)}${share}`));
+    }
+    parts.push(Text({ key: "v", bold: true, children: T.costShort(cost) }));
+    blocks.push({ key: "cost", tint: TINTS.cost, parts });
+  }
   // The cost goes first when the terminal is short of room.
-  if (cost !== null && cost >= 0.005 && mode !== "none") {
+  else if (cost !== null && cost >= 0.005 && mode !== "none") {
     const parts = [Text({ key: "v", bold: true, children: T.cost(cost) })];
     if (desktop) parts.unshift(icon(Svg, "i", "coin", ICON_COLORS.cost, T.icons.cost));
     if (lastPrompt !== null && lastPrompt >= 0.005) {
@@ -785,6 +853,35 @@ function drawLine(elements, surface, columns, now) {
     children.push(Box(row(b)));
   });
   return Box({ flexDirection: "row", alignItems: "center", paddingX: 1, children });
+}
+
+// Fork: width of the app band at a level, in pixels (see PX); drawLine's blocks, part for part.
+function pillsWidth(gauges, cacheNow, level) {
+  const text = (s) => String(s).length * PX.char;
+  const pill = (parts) => PX.pill + parts.reduce((sum, w) => sum + w, 0) + PX.gap * Math.max(0, parts.length - 1);
+  const pills = [];
+  if (readings.length > 0) {
+    const parts = [PX.weather, text(short(readings[readings.length - 1].tokens))];
+    if (readings.length >= 2 && level === 0) parts.push(PX.rule, barsWidth(turnDeltas().length), text(trendWord()));
+    else if (readings.length >= 2 && level === 1) parts.push(barsWidth(turnDeltas(COMPACT.bars).length));
+    pills.push(pill(parts));
+  }
+  const rate = speedRate();
+  if (rate !== null) pills.push(pill([...(level === 0 ? [PX.icon] : []), text(speedValue(rate)), text(T.speed)]));
+  for (const g of gauges) {
+    if (level === 0) pills.push(pill([PX.icon, text(g.label), GAUGE.width, text(g.value), ...(g.when ? [PX.rule, PX.small, text(g.when)] : [])]));
+    else pills.push(pill([text(g.label), COMPACT.gauge, text(g.value), ...(level === 1 && g.kind === "five_hour" && g.timeLeft ? [text(g.timeLeft)] : [])]));
+  }
+  if (cacheNow) {
+    if (level === 0) pills.push(pill([PX.icon, text(T.cache), text(cacheNow.value), ...(cacheNow.detail ? [PX.rule, text(cacheNow.detail)] : [])]));
+    else pills.push(pill([PX.icon, text(cacheNow.value), ...(cacheNow.short ?? cacheNow.detail ? [text(cacheNow.short ?? cacheNow.detail)] : [])]));
+  }
+  if (cost !== null && cost >= 0.005) {
+    if (level === 0) pills.push(pill([PX.icon, text(T.cost(cost)), ...(lastPrompt !== null && lastPrompt >= 0.005 ? [PX.rule, PX.small, text(T.lastPrompt(lastPrompt))] : [])]));
+    else pills.push(pill([...(level === 1 ? [PX.icon] : []), text(T.costShort(cost))]));
+  }
+  if (agents.length > 0) pills.push(pill([PX.icon, text(T.agents(agents.length))]));
+  return pills.reduce((sum, w) => sum + w, 0) + PX.gap * Math.max(0, pills.length - 1);
 }
 
 // Width of the terminal line in characters, with the bars and details.
@@ -853,15 +950,15 @@ function forecastFor(percent) {
 
 // Tokens added by each recent prompt (at most TURN_BARS), oldest first.
 // A compaction lowers the context: that prompt counts as 0.
-function turnDeltas() {
+function turnDeltas(count = TURN_BARS) {
   const deltas = [];
   for (let i = 1; i < readings.length; i++) deltas.push(Math.max(0, readings[i].tokens - readings[i - 1].tokens));
-  return deltas.slice(-TURN_BARS);
+  return deltas.slice(-count);
 }
 
 // Height relative to the heaviest prompt shown: the prompt that cost the most fills the height.
-function barLevels() {
-  const deltas = turnDeltas();
+function barLevels(count = TURN_BARS) {
+  const deltas = turnDeltas(count);
   const top = Math.max(...deltas, 1);
   return deltas.map((d) => d / top);
 }
@@ -882,9 +979,9 @@ function barsWidth(n) {
 }
 
 // App: rounded bars, the most recent in color; a prompt at 0 keeps a line on the floor.
-function barsSvg(color) {
+function barsSvg(color, count = TURN_BARS) {
   const { height, bar, gap } = SPARK;
-  const levels = barLevels();
+  const levels = barLevels(count);
   const width = barsWidth(levels.length);
   const x0 = 0;
   const rects = levels.map((level, i) => {
