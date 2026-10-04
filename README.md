@@ -57,7 +57,15 @@ Labels are in English or French. By default (`auto`) the mod follows `LC_ALL`, `
 /reload-plugins
 ```
 
-This fork, from a local clone:
+This fork, from GitHub:
+
+```
+/plugin marketplace add hnkabraham/claude-mods
+/plugin install token-weather-usage@hnkabraham-mods
+/reload-plugins
+```
+
+Or from a local clone:
 
 ```
 claude plugin marketplace add ~/Developer/claude-mods
