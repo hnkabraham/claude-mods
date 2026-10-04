@@ -60,7 +60,11 @@ for (const surface of ["terminal", "desktop"] as const) {
       for (const p of pills) {
         expect(p.props?.borderStyle).toBe("round");
         expect(p.props?.paddingY).toBe(0);
+        // Fork: pills keep their width; the band wraps them onto a second row when narrow.
+        expect(p.props?.flexShrink).toBe(0);
       }
+      const band = ((await ui.findAll({ type: "Box" })) as any[]).find((b) => b.props?.flexWrap);
+      expect(band?.props?.flexWrap).toBe("wrap");
     } else {
       expect(texts).toContain("☀");
       expect(texts).not.toContain("Clear");

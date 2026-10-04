@@ -774,8 +774,10 @@ function drawLine(elements, surface, columns, now) {
     // Pills: tinted, outlined, side by side. The app rounds a Box only through its border, and
     // a border brings a padding that made the band taller than the prompt box: paddingY, set
     // after it, takes the vertical part back.
-    const pills = blocks.map((b) => Box({ ...row(b), paddingX: 1, paddingY: 0, borderStyle: "round", borderColor: b.tint[1], backgroundColor: b.tint[0] }));
-    return Box({ flexDirection: "row", alignItems: "center", columnGap: 1, paddingX: 1, children: pills });
+    // Fork: a pill never shrinks (shrunk, its text wrapped onto extra lines or spilled into the
+    // next pill); when the band is narrower than the pills, they wrap onto a second row instead.
+    const pills = blocks.map((b) => Box({ ...row(b), flexShrink: 0, paddingX: 1, paddingY: 0, borderStyle: "round", borderColor: b.tint[1], backgroundColor: b.tint[0] }));
+    return Box({ flexDirection: "row", flexWrap: "wrap", alignItems: "center", columnGap: 1, rowGap: 1, paddingX: 1, children: pills });
   }
   const children = [];
   blocks.forEach((b, i) => {
